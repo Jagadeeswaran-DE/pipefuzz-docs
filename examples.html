@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="See how duplicate dimension keys amplify measures, and how the safe example prevents it.">
+  <meta name="color-scheme" content="light">
+  <title>Join walkthrough · PipeFuzz documentation</title>
+  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="assets/site.js" defer></script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="topbar">
+  <a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true">pf</span>PipeFuzz<span class="brand-divider">/</span><span class="brand-docs">Docs</span></a>
+  <div class="header-links"><span class="version">v0.1.0 <span>alpha</span></span><a href="https://github.com/Jagadeeswaran-DE/pipefuzz-docs">GitHub <span aria-hidden="true">↗</span></a><button class="menu-button" aria-expanded="false" aria-controls="sidebar">Menu</button></div>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar"><nav aria-label="Documentation"><p class="nav-label">Start here</p><a href="index.html">Introduction</a><a href="quickstart.html">Quick start</a><a href="examples.html" aria-current="page">Join walkthrough</a><p class="nav-label">Reference</p><a href="configuration.html">Configuration</a><a href="checks.html">Scenarios &amp; invariants</a><a href="cli.html">CLI &amp; troubleshooting</a><p class="nav-label">Under the hood</p><a href="architecture.html">Architecture &amp; limits</a></nav><div class="sidebar-note"><span class="eyebrow">The v0.1 boundary</span><p>Real PySpark.<br>Small generated inputs.<br>Local execution.</p><a href="architecture.html#limitations">Know the limits</a></div></aside>
+  <main id="main" tabindex="-1">
+    <div class="breadcrumb">Documentation <span>/</span> Start here</div>
+    <article><h1>One join. Two very different results.</h1><p class="lead">A many-to-one join can silently multiply a measure when the dimension contains repeated keys. These two repository examples use the same schema and assertion to make that failure visible.</p>
+
+<h2 id="broken-join">The broken join</h2>
+<p><code>examples/broken_join/pipeline.py</code> assumes that each customer key identifies one dimension row. Spark joins every matching row, so a duplicate customer repeats the order amount before the aggregation.</p>
+<pre><code class="language-python">&quot;&quot;&quot;A deliberately unsafe dimension join used by PipeFuzz&#x27;s real demo.&quot;&quot;&quot;
+
+from pyspark.sql import functions as F
+
+
+def transform(orders, customers):
+    return (
+        orders.join(customers, &quot;customer_id&quot;)
+        .groupBy(&quot;country&quot;)
+        .agg(F.sum(&quot;amount&quot;).alias(&quot;total_amount&quot;))
+    )</code></pre>
+<p>The function is ordinary PySpark code. PipeFuzz imports it, passes generated <code>orders</code> and <code>customers</code> DataFrames as keyword arguments, and materializes its result.</p>
+
+<h2 id="shared-configuration">Declare the property</h2>
+<p>Both example directories contain the following configuration. The relationship connects orders to customers; <code>join_amplification</code> generates matching keys with duplicate rows on the customer side. The invariant compares the sum of absolute <code>amount</code> values with the sum of absolute <code>total_amount</code> values.</p>
+<pre><code class="language-yaml">version: 1
+inputs:
+  orders:
+    schema:
+      - {name: customer_id, type: integer, nullable: false}
+      - {name: amount, type: double, nullable: false}
+    rows: {min: 1, max: 3}
+  customers:
+    schema:
+      - {name: customer_id, type: integer, nullable: false}
+      - {name: country, type: string, nullable: false}
+    primary_key: [customer_id]
+    rows: {min: 1, max: 3}
+relationships:
+  - name: orders_customer
+    from: {input: orders, columns: [customer_id]}
+    to: {input: customers, columns: [customer_id]}
+    cardinality: many_to_one
+scenarios: [join_amplification]
+invariants:
+  - type: no_join_amplification
+    relationship: orders_customer
+    input: orders
+    input_column: amount
+    output_column: total_amount</code></pre>
+<p><code>primary_key: [customer_id]</code> describes the intended key. It does not suppress adversarial duplicate keys, and it does not independently assert output uniqueness. Add an explicit <code>unique_key</code> invariant when that is a property you need to test. See the <a href="configuration.html">configuration reference</a> and <a href="checks.html">scenario and invariant reference</a>.</p>
+
+<h2 id="run-the-examples">Run both versions</h2>
+<p>After the <a href="quickstart.html#install">checkout installation</a>, use your environment's <code>pipefuzz</code> executable. The following commands assume it is on <code>PATH</code>:</p>
+<pre><code class="language-bash">pipefuzz test examples/broken_join/pipeline.py::transform --config examples/broken_join/pipefuzz.yaml --max-examples 1 --seed 20260820
+pipefuzz test examples/safe_join/pipeline.py::transform --config examples/safe_join/pipefuzz.yaml --max-examples 1 --seed 20260820</code></pre>
+<p>The broken example is expected to exit <code>1</code>; the protected example is expected to exit <code>0</code>. Run each command independently if your shell or CI runner stops at the first nonzero status.</p>
+
+<h2 id="minimal-case">A recorded minimal failure</h2>
+<p>The 2026-09-29 release audit ran the installed 0.1.0 wheel on Windows, Python 3.13, Java 17, and Hypothesis 6.165.10 with seed <code>20260820</code>. The following tables and excerpt are an abridged presentation of that observed failure, not a promise of identical generated records across versions.</p>
+<h3 id="case-orders">Orders · one fact row</h3>
+<p>Schema: <code>customer_id: integer</code> and <code>amount: double</code>, both required.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th scope="col">customer_id</th><th scope="col">amount</th></tr></thead>
+  <tbody><tr><td>1</td><td>1.0</td></tr></tbody>
+</table></div>
+<h3 id="case-customers">Customers · two matching rows</h3>
+<p>Schema: <code>customer_id: integer</code> and <code>country: string</code>, both required. Here <code>""</code> represents the empty string.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th scope="col">customer_id</th><th scope="col">country</th></tr></thead>
+  <tbody><tr><td>1</td><td><code>""</code></td></tr><tr><td>1</td><td><code>""</code></td></tr></tbody>
+</table></div>
+<p>Joining the one order to both customer rows repeats its amount. The grouped output contains <code>total_amount = 2.0</code>, while the input absolute total is <code>1.0</code>.</p>
+<pre><code class="language-text">FAILED
+
+Classification: INVARIANT_VIOLATION
+
+Invariant
+  no_join_amplification
+
+Failing scenario
+  join_amplification
+
+Reason
+  Output measure exceeds the input measure; a join may have amplified fact values
+
+Context
+  input_absolute_total: 1.0
+  output_absolute_total: 2.0
+  tolerance: 1.001E-9</code></pre>
+<p>The full terminal report also contains the input schemas, record tables, Hypothesis version, seed, and a reproduction command. In this audit, Hypothesis executed four examples including shrinking, although <code>--max-examples</code> was set to <code>1</code>.</p>
+
+<h2 id="safe-join">Protect the measure before joining</h2>
+<p><code>examples/safe_join/pipeline.py</code> reduces the customer dimension to one row per key before the join. The recorded audit passed the same configured check with one generated example.</p>
+<pre><code class="language-python">&quot;&quot;&quot;A join that protects its many-to-one dimension contract.&quot;&quot;&quot;
+
+from pyspark.sql import functions as F
+
+
+def transform(orders, customers):
+    unique_customers = customers.dropDuplicates([&quot;customer_id&quot;])
+    return (
+        orders.join(unique_customers, &quot;customer_id&quot;)
+        .groupBy(&quot;country&quot;)
+        .agg(F.sum(&quot;amount&quot;).alias(&quot;total_amount&quot;))
+    )</code></pre>
+<aside class="callout">
+  <p><strong>Choose a survivor policy for real data.</strong> <code>dropDuplicates(["customer_id"])</code> does not define which record survives when rows share a customer ID but disagree on country or other attributes. The selected row can be nondeterministic. A production transformation needs an explicit rule, such as a well-defined ordering with a tie-breaker, if those attributes matter.</p>
+</aside>
+<p>The name “safe join” refers to this example's measure-amplification check. It does not certify dimension quality, attribute correctness, completeness, or every possible input. This invariant permits a lower output total, so dropped or unmatched orders need a separate assertion if losing them is unacceptable. See <a href="checks.html">check semantics</a> before applying the pattern.</p>
+
+<h2 id="adapt-the-example">Adapt the example</h2>
+<p>Keep the property specific to your pipeline. <code>no_join_amplification</code> is suitable when a measure should not increase across the transformation; a legitimate one-to-many expansion may need different assertions. Add the schemas and relationships you actually use, then select scenarios that challenge those assumptions. The <a href="cli.html#reproduce">CLI reproduction guidance</a> explains how to retain the conditions of a discovered failure.</p>
+</article>
+    <nav class="page-turn" aria-label="Previous and next pages"><a href="quickstart.html"><span>Previous</span>Quick start</a><a class="next" href="configuration.html"><span>Next</span>Configuration</a></nav>
+    <footer>PipeFuzz v0.1.0 · Apache-2.0 <span>Local testing. Explicit properties.</span><a href="https://github.com/Jagadeeswaran-DE/pipefuzz-docs/blob/main/examples.html">Page source</a></footer>
+  </main>
+  <aside class="toc" aria-label="On this page"><p>On this page</p><a href="#broken-join">The broken join</a><a href="#shared-configuration">Declare the property</a><a href="#run-the-examples">Run both versions</a><a href="#minimal-case">A recorded minimal failure</a><a href="#safe-join">Protect the measure before joining</a><a href="#adapt-the-example">Adapt the example</a><a class="back-top" href="#main">Back to top</a></aside>
+</div>
+<div class="copy-status" role="status" aria-live="polite"></div>
+</body>
+</html>
